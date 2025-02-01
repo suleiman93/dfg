@@ -1,0 +1,442 @@
+شؤ#include <Trade\Trade.mqh>  // تضمين مكتبة إدارة الصفقات
+CTrade trade;  // إنشاء كائن لإدارة الصفقات
+
+// تعريف الاتجاهات
+enum Direction { BUY, SELL };
+
+// متغيرات عامة
+double monthlyProfitTarget = 0.08; // هدف شهري بنسبة 8%
+double riskPerTrade = 0.005;       // نسبة المخاطرة لكل صفقة (0.5%)
+int maxTradesPerHour = 1;          // الحد الأقصى للصفقات في الساعة
+datetime lastTradeTime = 0;        // وقت آخر صفقة
+int tradesThisHour = 0;            // عدد الصفقات في الساعة الحالية
+double initialBalance;             // الرصيد الأولي
+bool isTradingStopped = false;     // حالة التوقف عن التداول
+int currentDay = -1;               // اليوم الحالي لتحديد بداية يوم جديد
+
+// دالة التهيئة
+int OnInit()
+{
+    initialBalance = AccountInfoDouble(ACCOUNT_BALANCE); // حفظ الرصيد الأولي
+
+    // عرض توقيت الخادم للتحقق
+    datetime currentTime = TimeCurrent();
+    MqlDateTime timeStruct;
+    TimeToStruct(currentTime, timeStruct);
+    Print("توقيت الخادم الحالي: ", timeStruct.hour, ":", timeStruct.min);
+
+    Print("تم تشغيل الروبوت بنجاح. الرصيد الأولي: ", initialBalance);
+    return(INIT_SUCCEEDED);
+}
+
+// دالة OnTick التي يتم تنفيذها عند كل تغير في السعر
+void OnTick()
+{
+    // التحقق من بداية يوم جديد وإعادة التشغيل التلقائي للتداول
+    if (IsNewDay())
+    {
+        isTradingStopped = false; // إعادة تعيين حالة التوقف
+        tradesThisHour = 0;       // إعادة تعيين عدد الصفقات في الساعة
+        Print("تم إعادة تشغيل التداول تلقائيًا في بداية اليوم الجديد.");
+    }
+
+    // التحقق من الوصول إلى الهدف الشهري
+    if (IsMonthlyProfitTargetReached())
+    {
+        Print("تم تحقيق الهدف الشهري. سيتم إيقاف التداول.");
+        isTradingStopped = true;
+        return;
+    }
+
+    // التحقق من أن الوقت الحالي داخل الجلسة الأوروبية أو الأمريكية
+    if (!IsTradingSession())
+    {
+        Print("الوقت الحالي خارج الجلسات المسموح بها. سيتم تخطي الدخون.");
+        return;
+    }
+
+    // التحقق من وجود أحداث أخبار
+    if (IsNewsTime())
+    {
+        Print("هناك حدث أخبار قريب. سيتم تخطي الدخون.");
+        return;
+    }
+
+    // التحقق من عدد الصفقات في الساعة
+    if (tradesThisHour >= maxTradesPerHour)
+    {
+        Print("تم الوصول إلى الحد الأقصى للصفقات في الساعة. سيتم تخطي الدخون.");
+        return;
+    }
+
+    // التحقق من وجود صفقات مفتوحة بالفعل
+    if (PositionsTotal() > 0)
+    {
+        UpdateTrailingStop(); // تحديث الستوب المتحرك
+        Print("هناك صفقات مفتوحة بالفعل. سيتم تخطي الدخون.");
+        return;
+    }
+
+    // التحقق من السوق الجانبي
+    if (IsSidewaysMarket())
+    {
+        Print("السوق جانبي. سيتم تخطي الدخون.");
+        return;
+    }
+
+    // الحصول على أسعار الطلب والعطاء
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+    // التحقق من شروط الشراء والبيع باستخدام SMC و MACD Divergence
+    if (IsBuyConditionMet(bid)) // الشراء إذا تحققت شروط الشراء
+    {
+        double stopLoss = 0, takeProfit = 0;
+        UpdateStopAndTakeProfit(stopLoss, takeProfit, bid, ask, Direction::BUY); // تحديث الستوب لوس وجني الأرباح
+        double lotSize = CalculateLotSize(riskPerTrade, MathAbs(bid - stopLoss));
+
+        Print("حجم الصفقة المقترح للشراء: ", lotSize);
+
+        if (lotSize < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) || lotSize > SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX))
+        {
+            Print("حجم الصفقة غير صالح: ", lotSize);
+            return;
+        }
+
+        trade.Buy(lotSize, _Symbol, ask, stopLoss, takeProfit, "Buy Order");
+        lastTradeTime = TimeCurrent();
+        tradesThisHour++;
+        Print("تم فتح صفقة شراء عند السعر: ", ask);
+    }
+    else if (IsSellConditionMet(ask)) // البيع إذا تحققت شروط البيع
+    {
+        double stopLoss = 0, takeProfit = 0;
+        UpdateStopAndTakeProfit(stopLoss, takeProfit, bid, ask, Direction::SELL); // تحديث الستوب لوس وجني الأرباح
+        double lotSize = CalculateLotSize(riskPerTrade, MathAbs(ask - stopLoss));
+
+        Print("حجم الصفقة المقترح للبيع: ", lotSize);
+
+        if (lotSize < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) || lotSize > SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX))
+        {
+            Print("حجم الصفقة غير صالح: ", lotSize);
+            return;
+        }
+
+        trade.Sell(lotSize, _Symbol, bid, stopLoss, takeProfit, "Sell Order");
+        lastTradeTime = TimeCurrent();
+        tradesThisHour++;
+        Print("تم فتح صفقة بيع عند السعر: ", bid);
+    }
+}
+
+// التحقق من بداية يوم جديد
+bool IsNewDay()
+{
+    datetime currentTime = TimeCurrent();
+    MqlDateTime timeStruct;
+    TimeToStruct(currentTime, timeStruct);
+
+    if (timeStruct.day != currentDay)
+    {
+        currentDay = timeStruct.day;
+        tradesThisHour = 0; // إعادة تعيين عدد الصفقات في الساعة
+        return true;
+    }
+    return false;
+}
+
+// التحقق من الوصول إلى الهدف الشهري
+bool IsMonthlyProfitTargetReached()
+{
+    double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double profitPercentage = (currentBalance - initialBalance) / initialBalance;
+    return (profitPercentage >= monthlyProfitTarget);
+}
+
+// التحقق من أن الوقت الحالي داخل الجلسة الأوروبية أو الأمريكية
+bool IsTradingSession()
+{
+    MqlDateTime timeStruct;
+    TimeToStruct(TimeCurrent(), timeStruct);
+
+    // عرض توقيت الخادم للتحقق
+    Print("الوقت الحالي على الخادم: ", timeStruct.hour, ":", timeStruct.min);
+
+    // الجلسة الأوروبية: من الساعة 10:00 إلى 18:00 بتوقيت GMT+2
+    if (timeStruct.hour >= 10 && timeStruct.hour < 18)
+    {
+        Print("الوقت الحالي داخل الجلسة الأوروبية.");
+        return true;
+    }
+
+    // الجلسة الأمريكية: من الساعة 15:00 إلى 24:00 بتوقيت GMT+2
+    if (timeStruct.hour >= 15 || timeStruct.hour < 0) // حتى منتصف الليل
+    {
+        Print("الوقت الحالي داخل الجلسة الأمريكية.");
+        return true;
+    }
+
+    Print("الوقت الحالي خارج الجلسات المسموح بها.");
+    return false;
+}
+
+// التحقق من وجود أحداث أخبار
+bool IsNewsTime()
+{
+    MqlDateTime timeStruct;
+    TimeToStruct(TimeCurrent(), timeStruct);
+
+    // قائمة بأوقات الأخبار المهمة (مثال: الساعة 14:30 بتوقيت GMT+2)
+    int newsHours[] = {14}; // يمكنك إضافة المزيد من الأوقات هنا
+    int newsMinutes[] = {30}; // يمكنك إضافة المزيد من الدقائق هنا
+
+    for (int i = 0; i < ArraySize(newsHours); i++)
+    {
+        if (timeStruct.hour == newsHours[i] && timeStruct.min == newsMinutes[i])
+        {
+            Print("هناك حدث أخبار قريب. سيتم تخطي الدخون.");
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// حساب حجم الصفقة بناءً على نسبة المخاطرة
+double CalculateLotSize(double riskPercentage, double stopLossDistance)
+{
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+    double lotSize = NormalizeDouble((accountBalance * riskPercentage) / (stopLossDistance / _Point * tickValue), 2);
+    lotSize = NormalizeLotSize(lotSize);
+    return lotSize;
+}
+
+// تطبيع حجم الصفقة
+double NormalizeLotSize(double lotSize)
+{
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+    if (lotSize < minLot) lotSize = minLot;
+    if (lotSize > maxLot) lotSize = maxLot;
+
+    lotSize = NormalizeDouble(MathFloor(lotSize / lotStep) * lotStep, 2);
+    return lotSize;
+}
+
+// التحقق من Break of Structure (BOS)
+bool IsBOS(Direction direction)
+{
+    double high1 = iHigh(_Symbol, PERIOD_H1, 1);
+    double low1 = iLow(_Symbol, PERIOD_H1, 1);
+    double high2 = iHigh(_Symbol, PERIOD_H1, 2);
+    double low2 = iLow(_Symbol, PERIOD_H1, 2);
+
+    if (direction == Direction::BUY)
+    {
+        // الشراء: إذا تم كسر أعلى سعر للشموع السابقة
+        if (high1 > high2)
+        {
+            Print("تم العثور على Break of Structure للشراء.");
+            return true;
+        }
+    }
+    else if (direction == Direction::SELL)
+    {
+        // البيع: إذا تم كسر أدنى سعر للشموع السابقة
+        if (low1 < low2)
+        {
+            Print("تم العثور على Break of Structure للبيع.");
+            return true;
+        }
+    }
+
+    Print("لم يتم العثور على Break of Structure.");
+    return false;
+}
+
+// التحقق من Change of Character (CHoCH)
+bool IsCHoCH(Direction direction)
+{
+    double high1 = iHigh(_Symbol, PERIOD_H1, 1);
+    double low1 = iLow(_Symbol, PERIOD_H1, 1);
+    double high2 = iHigh(_Symbol, PERIOD_H1, 2);
+    double low2 = iLow(_Symbol, PERIOD_H1, 2);
+    double high3 = iHigh(_Symbol, PERIOD_H1, 3);
+    double low3 = iLow(_Symbol, PERIOD_H1, 3);
+
+    if (direction == Direction::BUY)
+    {
+        // الشراء: إذا كان السعر يصنع قممًا مرتفعة وأدنى مستويات منخفضة ثم يعود للأعلى
+        if (high1 > high2 && low1 < low2 && high1 > high3)
+        {
+            Print("تم العثور على Change of Character للشراء.");
+            return true;
+        }
+    }
+    else if (direction == Direction::SELL)
+    {
+        // البيع: إذا كان السعر يصنع قيعانًا منخفضة وأعلى مستويات مرتفعة ثم يعود للأسفل
+        if (low1 < low2 && high1 > high2 && low1 < low3)
+        {
+            Print("تم العثور على Change of Character للبيع.");
+            return true;
+        }
+    }
+
+    Print("لم يتم العثور على Change of Character.");
+    return false;
+}
+
+// التحقق من MACD Divergence على مدى 7 شموع (محسن)
+bool IsMACDDivergence(Direction direction)
+{
+    int macdHandle = iMACD(_Symbol, PERIOD_H1, 12, 26, 9, PRICE_CLOSE);
+    if (macdHandle == INVALID_HANDLE)
+    {
+        Print("خطأ: لم يتم إنشاء مؤشر MACD.");
+        return false;
+    }
+
+    double macdMain[], signalLine[];
+    ArraySetAsSeries(macdMain, true);
+    ArraySetAsSeries(signalLine, true);
+
+    int copied = CopyBuffer(macdHandle, 0, 0, 8, macdMain); // المؤشر الرئيسي (آخر 8 شموع)
+    if (copied < 8)
+    {
+        Print("خطأ: لم يتم نسخ بيانات MACD Main.");
+        return false;
+    }
+
+    copied = CopyBuffer(macdHandle, 1, 0, 8, signalLine); // خط الإشارة (آخر 8 شموع)
+    if (copied < 8)
+    {
+        Print("خطأ: لم يتم نسخ بيانات MACD Signal.");
+        return false;
+    }
+
+    // الحصول على أسعار السعر لآخر 7 شموع
+    double highs[8], lows[8];
+    for (int i = 0; i < 8; i++)
+    {
+        highs[i] = iHigh(_Symbol, PERIOD_H1, i);
+        lows[i] = iLow(_Symbol, PERIOD_H1, i);
+    }
+
+    if (direction == Direction::BUY)
+    {
+        // الشراء: إذا كان السعر يصنع قيعانًا أدنى ولكن MACD يصنع قيعانًا أعلى
+        if (lows[1] < lows[7] && macdMain[1] > macdMain[7])
+        {
+            Print("تم العثور على MACD Divergence للشراء.");
+            return true;
+        }
+    }
+    else if (direction == Direction::SELL)
+    {
+        // البيع: إذا كان السعر يصنع قممًا أعلى ولكن MACD يصنع قممًا أقل
+        if (highs[1] > highs[7] && macdMain[1] < macdMain[7])
+        {
+            Print("تم العثور على MACD Divergence للبيع.");
+            return true;
+        }
+    }
+
+    Print("لم يتم العثور على MACD Divergence.");
+    return false;
+}
+
+// تجنب السوق الجانبي
+bool IsSidewaysMarket()
+{
+    double highestHigh = iHigh(_Symbol, PERIOD_H1, iHighest(_Symbol, PERIOD_H1, MODE_HIGH, 16, 0));
+    double lowestLow = iLow(_Symbol, PERIOD_H1, iLowest(_Symbol, PERIOD_H1, MODE_LOW, 16, 0));
+
+    double range = highestHigh - lowestLow;
+
+    if (range <= 500 * _Point) // النطاق الجانبي: أقل من 500 نقطة
+    {
+        Print("السوق جانبي. النطاق هو: ", range / _Point, " نقطة.");
+        return true;
+    }
+
+    Print("السوق ليس جانبيًا. النطاق هو: ", range / _Point, " نقطة.");
+    return false;
+}
+
+// تحديث الستوب لوس وجني الأرباح بناءً على تقلب السوق
+void UpdateStopAndTakeProfit(double &stopLoss, double &takeProfit, double bid, double ask, Direction direction)
+{
+    double atrHandle = iATR(_Symbol, PERIOD_H1, 14); // استخدام ATR لقياس التقلب
+    if (atrHandle == INVALID_HANDLE)
+    {
+        Print("خطأ: لم يتم إنشاء مؤشر ATR.");
+        return;
+    }
+
+    double atrValues[];
+    ArraySetAsSeries(atrValues, true);
+    int copied = CopyBuffer(atrHandle, 0, 0, 1, atrValues);
+    if (copied < 1)
+    {
+        Print("خطأ: لم يتم نسخ بيانات ATR.");
+        return;
+    }
+
+    double atrValue = atrValues[0]; // قيمة ATR الحالية
+
+    if (direction == Direction::BUY)
+    {
+        stopLoss = bid - atrValue * 2; // ستوب لوس ديناميكي بناءً على ATR
+        takeProfit = bid + atrValue * 4; // جني الأرباح ديناميكي بناءً على ATR
+    }
+    else if (direction == Direction::SELL)
+    {
+        stopLoss = ask + atrValue * 2; // ستوب لوس ديناميكي بناءً على ATR
+        takeProfit = ask - atrValue * 4; // جني الأرباح ديناميكي بناءً على ATR
+    }
+
+    Print("تم تحديث الستوب لوس والجني الأرباح بناءً على ATR.");
+}
+
+// تحديث الستوب المتحرك (Trailing Stop)
+void UpdateTrailingStop()
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (PositionSelectByTicket(ticket))
+        {
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+            double stopLoss = PositionGetDouble(POSITION_SL);
+            double trailingStep = 100 * _Point;
+
+            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+            {
+                // الشراء: تحريك الستوب لوس بمقدار 100 نقطة كلما تحرك السعر نحو الهدف بمقدار 100 نقطة
+                if (currentPrice - openPrice >= trailingStep && (stopLoss == 0 || currentPrice - trailingStep > stopLoss))
+                {
+                    double newStopLoss = currentPrice - trailingStep;
+                    trade.PositionModify(ticket, newStopLoss, PositionGetDouble(POSITION_TP));
+                    Print("تم تحديث الستوب المتحرك للشراء إلى: ", newStopLoss);
+                }
+            }
+            else if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+            {
+                // البيع: تحريك الستوب لوس بمقدار 100 نقطة كلما تحرك السعر نحو الهدف بمقدار 100 نقطة
+                if (openPrice - currentPrice >= trailingStep && (stopLoss == 0 || currentPrice + trailingStep < stopLoss))
+                {
+                    double newStopLoss = currentPrice + trailingStep;
+                    trade.PositionModify(ticket, newStopLoss, PositionGetDouble(POSITION_TP));
+                    Print("تم تحديث الستوب المتحرك للبيع إلى: ", newStopLoss);
+                }
+            }
+        }
+    }
+}
